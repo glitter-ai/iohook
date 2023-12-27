@@ -17,10 +17,11 @@ function optionsFromPackage(attempts) {
   }
   let mainPath = Array(attempts).join('../');
   try {
-    const content = fs.readFileSync(
-      path.join(__dirname, mainPath, 'package.json'),
-      'utf-8'
-    );
+    const filePath = path.join(__dirname, mainPath, 'package.json');
+
+    console.log('Attempting to look for your package.json file at: ', filePath);
+
+    const content = fs.readFileSync(filePath, 'utf-8');
     const packageJson = JSON.parse(content);
     const opts = packageJson.iohook || {};
     if (!opts.targets) {
