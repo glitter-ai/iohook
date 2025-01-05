@@ -9,7 +9,7 @@ on:
 
 env:
   ELECTRON_VERSION: 33.2.1  # the specific Electron version
-  NODE_VERSION: 18.18.2 # The corresponding node version that electron uses
+  NODE_VERSION: 18.18.2
   
 jobs:
   ci:
