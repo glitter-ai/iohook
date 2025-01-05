@@ -8,7 +8,6 @@ on:
     branches: [master]
 
 env:
-  ELECTRON_VERSION: 33.2.1  # the specific Electron version
   NODE_VERSION: 18.18.2
   
 jobs:
@@ -38,7 +37,7 @@ jobs:
         run: npm i --ignore-scripts
 
       - name: Patch Nan
-        run: npm run postinstall
+        run: npm run patch-nan
         shell: bash
 
       - name: Build & Publish Prebuilds

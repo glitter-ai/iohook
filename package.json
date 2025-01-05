@@ -1,6 +1,6 @@
 {
   "name": "iohook",
-  "version": "1.0.30",
+  "version": "1.0.31",
   "description": "Node.js global keyboard and mouse hook (fork)",
   "author": "Everybody",
   "license": "MIT",
@@ -16,7 +16,7 @@
   "types": "index.d.ts",
   "scripts": {
     "install": "node install.js",
-    "build": "node build.js --upload=false",
+    "build": "npm run patch-nan && node build.js --upload=false",
     "build:ci": "node build.js --all",
     "build:print": "node -e 'require(\"./helpers\").printManualBuildParams()'",
     "test": "jest",
@@ -26,7 +26,7 @@
     "docs:build": "vuepress build docs",
     "docs:deploy": "npm run docs:build && gh-pages -d docs/.vuepress/dist/",
     "release": "git add . && git commit -am 'version bump' && git tag v$(node -p \"require('./package.json').version\") && git push --tags",
-    "postinstall": "sed 's/^#include .nan_scriptorigin\\.h./\\/\\/ #include nan_scriptorigin.h/' ./node_modules/nan/nan.h > ./node_modules/nan/nan.h.new && mv ./node_modules/nan/nan.h.new ./node_modules/nan/nan.h"
+    "patch-nan": "sed 's/^#include .nan_scriptorigin\\.h./\\/\\/ #include nan_scriptorigin.h/' ./node_modules/nan/nan.h > ./node_modules/nan/nan.h.new && mv ./node_modules/nan/nan.h.new ./node_modules/nan/nan.h"
   },
   "keywords": [
     "hook",
