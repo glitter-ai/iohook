@@ -1,10 +1,10 @@
 {
   "name": "iohook",
-  "version": "1.0.40",
+  "version": "1.0.42",
   "description": "Node.js global keyboard and mouse hook (fork)",
   "author": "Everybody",
   "license": "MIT",
-  "homepage": "https://github.com/glitter-ai/iohook",
+  "homepage": "https://github.com/yiranmiao/iohook",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/glitter-ai/iohook.git"
