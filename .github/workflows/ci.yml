@@ -16,9 +16,9 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: macos-13
+          - os: macos-15 # cross-compiles x64 via the ARCH env
             arch: x64
-          - os: macos-13 # cross-compiles arm64 via the ARCH env
+          - os: macos-15 # native arm64
             arch: arm64
           - os: windows-latest
             arch: x64
@@ -36,7 +36,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
       - name: Install setuptools for node-gyp (mac)
-        if: matrix.os == 'macos-13'
+        if: startsWith(matrix.os, 'macos')
         run: python3 -m pip install --break-system-packages setuptools
 
       - name: Install Packages
