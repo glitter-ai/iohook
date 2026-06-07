@@ -14,16 +14,16 @@
 
 #include <pthread.h>
 #endif
-#include <queue>
 
-using namespace v8;
-using Callback = Nan::Callback;
+#include <thread>
+
 static bool sIsRunning = false;
 static bool sIsDebug = false;
 
-static HookProcessWorker* sIOHook = nullptr;
-
-static std::queue<uiohook_event> zqueue;
+// thread-safe bridge from the native hook thread to the JS callback; ABI-stable, so this
+// binary loads on any Node/Electron with N-API >= 9 and never needs an ABI-targeted rebuild
+static Napi::ThreadSafeFunction sTsfn;
+static std::thread sWorkerThread;
 
 // Native thread errors.
 #define UIOHOOK_ERROR_THREAD_CREATE       0x10
@@ -68,12 +68,63 @@ bool logger_proc(unsigned int level, const char *format, ...) {
   return status;
 }
 
+// builds the JS event object on the main thread, matching the shape index.js expects
+// (type/mask/time + a nested keyboard|mouse|wheel object)
+Napi::Value fillEventObject(Napi::Env env, const uiohook_event &event) {
+  Napi::Object obj = Napi::Object::New(env);
+
+  obj.Set("type", Napi::Number::New(env, (uint16_t)event.type));
+  obj.Set("mask", Napi::Number::New(env, (uint16_t)event.mask));
+  obj.Set("time", Napi::Number::New(env, (uint16_t)event.time));
+
+  if ((event.type >= EVENT_KEY_TYPED) && (event.type <= EVENT_KEY_RELEASED)) {
+    Napi::Object keyboard = Napi::Object::New(env);
+
+    keyboard.Set("shiftKey", Napi::Boolean::New(env,
+        event.data.keyboard.keycode == VC_SHIFT_L || event.data.keyboard.keycode == VC_SHIFT_R));
+    keyboard.Set("altKey", Napi::Boolean::New(env,
+        event.data.keyboard.keycode == VC_ALT_L || event.data.keyboard.keycode == VC_ALT_R));
+    keyboard.Set("ctrlKey", Napi::Boolean::New(env,
+        event.data.keyboard.keycode == VC_CONTROL_L || event.data.keyboard.keycode == VC_CONTROL_R));
+    keyboard.Set("metaKey", Napi::Boolean::New(env,
+        event.data.keyboard.keycode == VC_META_L || event.data.keyboard.keycode == VC_META_R));
+
+    if (event.type == EVENT_KEY_TYPED) {
+      keyboard.Set("keychar", Napi::Number::New(env, (uint16_t)event.data.keyboard.keychar));
+      keyboard.Set("key", Napi::String::New(env, (const char *)&event.data.keyboard.keychar));
+    }
+
+    keyboard.Set("keycode", Napi::Number::New(env, (uint16_t)event.data.keyboard.keycode));
+    keyboard.Set("rawcode", Napi::Number::New(env, (uint16_t)event.data.keyboard.rawcode));
+
+    obj.Set("keyboard", keyboard);
+  } else if ((event.type >= EVENT_MOUSE_CLICKED) && (event.type < EVENT_MOUSE_WHEEL)) {
+    Napi::Object mouse = Napi::Object::New(env);
+    mouse.Set("button", Napi::Number::New(env, (uint16_t)event.data.mouse.button));
+    mouse.Set("clicks", Napi::Number::New(env, (uint16_t)event.data.mouse.clicks));
+    mouse.Set("x", Napi::Number::New(env, (int16_t)event.data.mouse.x));
+    mouse.Set("y", Napi::Number::New(env, (int16_t)event.data.mouse.y));
+
+    obj.Set("mouse", mouse);
+  } else if (event.type == EVENT_MOUSE_WHEEL) {
+    Napi::Object wheel = Napi::Object::New(env);
+    wheel.Set("amount", Napi::Number::New(env, (uint16_t)event.data.wheel.amount));
+    wheel.Set("clicks", Napi::Number::New(env, (uint16_t)event.data.wheel.clicks));
+    wheel.Set("direction", Napi::Number::New(env, (int16_t)event.data.wheel.direction));
+    wheel.Set("rotation", Napi::Number::New(env, (int16_t)event.data.wheel.rotation));
+    wheel.Set("type", Napi::Number::New(env, (int16_t)event.data.wheel.type));
+    wheel.Set("x", Napi::Number::New(env, (int16_t)event.data.wheel.x));
+    wheel.Set("y", Napi::Number::New(env, (int16_t)event.data.wheel.y));
+
+    obj.Set("wheel", wheel);
+  }
+
+  return obj;
+}
+
 // NOTE: The following callback executes on the same thread that hook_run() is called
 // from.  This is important because hook_run() attaches to the operating systems
 // event dispatcher and may delay event delivery to the target application.
-// Furthermore, some operating systems may choose to disable your hook if it
-// takes to long to process.  If you need to do any extended processing, please
-// do so by copying the event to your own queued dispatch thread.
 void dispatch_proc(uiohook_event * const event) {
   switch (event->type) {
     case EVENT_HOOK_ENABLED:
@@ -124,12 +175,19 @@ void dispatch_proc(uiohook_event * const event) {
     case EVENT_MOUSE_CLICKED:
     case EVENT_MOUSE_MOVED:
     case EVENT_MOUSE_DRAGGED:
-    case EVENT_MOUSE_WHEEL:
-      uiohook_event event_copy;
-      memcpy(&event_copy, event, sizeof(uiohook_event));
-      zqueue.push(event_copy);
-      sIOHook->fHookExecution->Send(event, sizeof(uiohook_event));
+    case EVENT_MOUSE_WHEEL: {
+      // hand a heap copy to the JS thread; the marshaling callback owns and frees it
+      uiohook_event *event_copy = new uiohook_event;
+      memcpy(event_copy, event, sizeof(uiohook_event));
+      auto callJs = [](Napi::Env env, Napi::Function jsCallback, uiohook_event *data) {
+        jsCallback.Call({fillEventObject(env, *data)});
+        delete data;
+      };
+      if (sTsfn.NonBlockingCall(event_copy, callJs) != napi_ok) {
+        delete event_copy;
+      }
       break;
+    }
   }
 }
 
@@ -395,170 +453,47 @@ void stop() {
       break;
   }
 
-  #ifdef _WIN32
-  // Create event handles for the thread hook.
-  CloseHandle(hook_thread);
-  DeleteCriticalSection(&hook_running_mutex);
-  DeleteCriticalSection(&hook_control_mutex);
-  #else
-  pthread_mutex_destroy(&hook_running_mutex);
-  pthread_mutex_destroy(&hook_control_mutex);
-  pthread_cond_destroy(&hook_control_cond);
-  #endif
+  // the control/running sync primitives are process-lifetime singletons; destroying them here
+  // would race the worker thread still unwinding run(), so we intentionally leave them in place
 }
 
-HookProcessWorker::HookProcessWorker(Nan::Callback * callback) :
-Nan::AsyncProgressWorkerBase<uiohook_event>(callback),
-fHookExecution(nullptr)
-{
-
-}
-
-v8::Local<v8::Object> fillEventObject(uiohook_event event) {
-  v8::Local<v8::Object> obj = Nan::New<v8::Object>();
-
-  obj->Set(v8::Isolate::GetCurrent()->GetCurrentContext(), Nan::New("type").ToLocalChecked(), Nan::New((uint16_t)event.type));
-  obj->Set(v8::Isolate::GetCurrent()->GetCurrentContext(), Nan::New("mask").ToLocalChecked(), Nan::New((uint16_t)event.mask));
-  obj->Set(v8::Isolate::GetCurrent()->GetCurrentContext(), Nan::New("time").ToLocalChecked(), Nan::New((uint16_t)event.time));
-
-  if ((event.type >= EVENT_KEY_TYPED) && (event.type <= EVENT_KEY_RELEASED)) {
-    v8::Local<v8::Object> keyboard = Nan::New<v8::Object>();
-
-    if (event.data.keyboard.keycode == VC_SHIFT_L || event.data.keyboard.keycode == VC_SHIFT_R) {
-      keyboard->Set(v8::Isolate::GetCurrent()->GetCurrentContext(), Nan::New("shiftKey").ToLocalChecked(), Nan::New(true));
-    } else {
-      keyboard->Set(v8::Isolate::GetCurrent()->GetCurrentContext(), Nan::New("shiftKey").ToLocalChecked(), Nan::New(false));
-    }
-
-    if (event.data.keyboard.keycode == VC_ALT_L || event.data.keyboard.keycode == VC_ALT_R) {
-      keyboard->Set(v8::Isolate::GetCurrent()->GetCurrentContext(), Nan::New("altKey").ToLocalChecked(), Nan::New(true));
-    } else {
-      keyboard->Set(v8::Isolate::GetCurrent()->GetCurrentContext(), Nan::New("altKey").ToLocalChecked(), Nan::New(false));
-    }
-
-    if (event.data.keyboard.keycode == VC_CONTROL_L || event.data.keyboard.keycode == VC_CONTROL_R) {
-      keyboard->Set(v8::Isolate::GetCurrent()->GetCurrentContext(), Nan::New("ctrlKey").ToLocalChecked(), Nan::New(true));
-    } else {
-      keyboard->Set(v8::Isolate::GetCurrent()->GetCurrentContext(), Nan::New("ctrlKey").ToLocalChecked(), Nan::New(false));
-    }
-
-    if (event.data.keyboard.keycode == VC_META_L || event.data.keyboard.keycode == VC_META_R) {
-      keyboard->Set(v8::Isolate::GetCurrent()->GetCurrentContext(), Nan::New("metaKey").ToLocalChecked(), Nan::New(true));
-    } else {
-      keyboard->Set(v8::Isolate::GetCurrent()->GetCurrentContext(), Nan::New("metaKey").ToLocalChecked(), Nan::New(false));
-    }
-
-    if (event.type == EVENT_KEY_TYPED) {
-      char* character = (char*) &event.data.keyboard.keychar;
-
-      keyboard->Set(v8::Isolate::GetCurrent()->GetCurrentContext(), Nan::New("keychar").ToLocalChecked(), Nan::New((uint16_t)event.data.keyboard.keychar));
-      keyboard->Set(v8::Isolate::GetCurrent()->GetCurrentContext(), Nan::New("key").ToLocalChecked(), Nan::New(character).ToLocalChecked());
-    }
-
-    keyboard->Set(v8::Isolate::GetCurrent()->GetCurrentContext(), Nan::New("keycode").ToLocalChecked(), Nan::New((uint16_t)event.data.keyboard.keycode));
-    keyboard->Set(v8::Isolate::GetCurrent()->GetCurrentContext(), Nan::New("rawcode").ToLocalChecked(), Nan::New((uint16_t)event.data.keyboard.rawcode));
-
-    obj->Set(v8::Isolate::GetCurrent()->GetCurrentContext(), Nan::New("keyboard").ToLocalChecked(), keyboard);
-  } else if ((event.type >= EVENT_MOUSE_CLICKED) && (event.type < EVENT_MOUSE_WHEEL)) {
-    v8::Local<v8::Object> mouse = Nan::New<v8::Object>();
-    mouse->Set(v8::Isolate::GetCurrent()->GetCurrentContext(), Nan::New("button").ToLocalChecked(), Nan::New((uint16_t)event.data.mouse.button));
-    mouse->Set(v8::Isolate::GetCurrent()->GetCurrentContext(), Nan::New("clicks").ToLocalChecked(), Nan::New((uint16_t)event.data.mouse.clicks));
-    mouse->Set(v8::Isolate::GetCurrent()->GetCurrentContext(), Nan::New("x").ToLocalChecked(), Nan::New((int16_t)event.data.mouse.x));
-    mouse->Set(v8::Isolate::GetCurrent()->GetCurrentContext(), Nan::New("y").ToLocalChecked(), Nan::New((int16_t)event.data.mouse.y));
-
-    obj->Set(v8::Isolate::GetCurrent()->GetCurrentContext(), Nan::New("mouse").ToLocalChecked(), mouse);
-  } else if (event.type == EVENT_MOUSE_WHEEL) {
-    v8::Local<v8::Object> wheel = Nan::New<v8::Object>();
-    wheel->Set(v8::Isolate::GetCurrent()->GetCurrentContext(), Nan::New("amount").ToLocalChecked(), Nan::New((uint16_t)event.data.wheel.amount));
-    wheel->Set(v8::Isolate::GetCurrent()->GetCurrentContext(), Nan::New("clicks").ToLocalChecked(), Nan::New((uint16_t)event.data.wheel.clicks));
-    wheel->Set(v8::Isolate::GetCurrent()->GetCurrentContext(), Nan::New("direction").ToLocalChecked(), Nan::New((int16_t)event.data.wheel.direction));
-    wheel->Set(v8::Isolate::GetCurrent()->GetCurrentContext(), Nan::New("rotation").ToLocalChecked(), Nan::New((int16_t)event.data.wheel.rotation));
-    wheel->Set(v8::Isolate::GetCurrent()->GetCurrentContext(), Nan::New("type").ToLocalChecked(), Nan::New((int16_t)event.data.wheel.type));
-    wheel->Set(v8::Isolate::GetCurrent()->GetCurrentContext(), Nan::New("x").ToLocalChecked(), Nan::New((int16_t)event.data.wheel.x));
-    wheel->Set(v8::Isolate::GetCurrent()->GetCurrentContext(), Nan::New("y").ToLocalChecked(), Nan::New((int16_t)event.data.wheel.y));
-
-    obj->Set(v8::Isolate::GetCurrent()->GetCurrentContext(), Nan::New("wheel").ToLocalChecked(), wheel);
-  }
-  return obj;
-}
-
-void HookProcessWorker::HandleProgressCallback(const uiohook_event * event, size_t size)
-{
-  uiohook_event ev;
-  while (!zqueue.empty()) {
-    ev = zqueue.front();
-
-    HandleScope scope(Isolate::GetCurrent());
-
-    v8::Local<v8::Object> obj = fillEventObject(ev);
-
-    v8::Local<v8::Value> argv[] = { obj };
-    callback->Call(1, argv);
-
-    zqueue.pop();
+void DebugEnable(const Napi::CallbackInfo &info) {
+  if (info.Length() > 0) {
+    sIsDebug = info[0].ToBoolean().Value();
   }
 }
 
-void HookProcessWorker::Execute(const Nan::AsyncProgressWorkerBase<uiohook_event>::ExecutionProgress& progress)
-{
-  fHookExecution = &progress;
-  run();
+void StartHook(const Napi::CallbackInfo &info) {
+  if (sIsRunning) return;
+  if (info.Length() == 0 || !info[0].IsFunction()) return;
+
+  if (info.Length() == 2) {
+    sIsDebug = info[1].ToBoolean().Value();
+  }
+
+  // queue size 0 = unlimited; one producer thread (the native hook thread)
+  sTsfn = Napi::ThreadSafeFunction::New(info.Env(), info[0].As<Napi::Function>(), "iohook", 0, 1);
+  // a global input hook must never keep the process alive - unref so app quit isn't blocked by this handle
+  sTsfn.Unref(info.Env());
+  sIsRunning = true;
+  sWorkerThread = std::thread(run);
 }
 
-void HookProcessWorker::Stop()
-{
+void StopHook(const Napi::CallbackInfo &info) {
+  if (!sIsRunning) return;
   stop();
   sIsRunning = false;
-}
-
-NAN_METHOD(DebugEnable) {
-  if (info.Length() > 0)
-  {
-    sIsDebug = info[0]->IsTrue();
+  if (sWorkerThread.joinable()) {
+    sWorkerThread.detach();
   }
+  sTsfn.Release();
 }
 
-NAN_METHOD(StartHook) {
-  //allow one single execution
-  if (sIsRunning == false)
-  {
-    if (info.Length() > 0)
-    {
-      if (info.Length() == 2) {
-        if (info[1]->IsTrue()) {
-          sIsDebug = true;
-        } else {
-          sIsDebug = false;
-        }
-      }
-      if (info[0]->IsFunction())
-      {
-        Callback* callback = new Callback(info[0].As<Function>());
-        sIOHook = new HookProcessWorker(callback);
-        Nan::AsyncQueueWorker(sIOHook);
-        sIsRunning = true;
-      }
-    }
-  }
+Napi::Object Init(Napi::Env env, Napi::Object exports) {
+  exports.Set("startHook", Napi::Function::New(env, StartHook));
+  exports.Set("stopHook", Napi::Function::New(env, StopHook));
+  exports.Set("debugEnable", Napi::Function::New(env, DebugEnable));
+  return exports;
 }
 
-NAN_METHOD(StopHook) {
-  //allow one single execution
-  if ((sIsRunning == true) && (sIOHook != nullptr))
-  {
-    sIOHook->Stop();
-  }
-}
-
-NAN_MODULE_INIT(Init) {
-  Nan::Set(target, Nan::New<String>("startHook").ToLocalChecked(),
-  Nan::GetFunction(Nan::New<FunctionTemplate>(StartHook)).ToLocalChecked());
-
-  Nan::Set(target, Nan::New<String>("stopHook").ToLocalChecked(),
-  Nan::GetFunction(Nan::New<FunctionTemplate>(StopHook)).ToLocalChecked());
-
-  Nan::Set(target, Nan::New<String>("debugEnable").ToLocalChecked(),
-  Nan::GetFunction(Nan::New<FunctionTemplate>(DebugEnable)).ToLocalChecked());
-}
-
-NODE_MODULE(nodeHook, Init)
+NODE_API_MODULE(nodeHook, Init)

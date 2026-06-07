@@ -1,282 +1,59 @@
-const spawn = require('child_process').spawn;
-const execSync = require('child_process').execSync;
+// Builds the N-API addon for the host platform/arch and packages it as
+// prebuilds/iohook-v<version>-<platform>-<arch>.tar.gz. The binary is ABI-stable
+// (N-API), so one build per platform/arch works on every Node/Electron with N-API >= 9.
+// CI uploads the tarball to the matching GitHub release; install.js downloads it.
+
+const { execSync } = require('child_process');
 const fs = require('fs-extra');
 const path = require('path');
 const tar = require('tar');
-const argv = require('minimist')(process.argv.slice(2), {
-  // Specify that these arguments should be a string
-  string: ['version', 'runtime', 'abi'],
-});
+const argv = require('minimist')(process.argv.slice(2));
 const pkg = require('./package.json');
-const nodeAbi = require('node-abi');
-const { optionsFromPackage } = require('./helpers');
 
-let arch = process.env.ARCH ?
-  process.env.ARCH.replace('i686', 'ia32').replace('x86_64', 'x64') :
-  process.arch;
+const platform = process.platform;
+const arch = process.env.ARCH
+  ? process.env.ARCH.replace('i686', 'ia32').replace('x86_64', 'x64')
+  : process.arch;
+const platformDir = `${platform}-${arch}`;
 
-console.log("\n\n============= arch:\n\n" + arch + "\n\n====================\n\n")
+const SHARED_LIB = { darwin: 'uiohook.dylib', win32: 'uiohook.dll', linux: 'uiohook.so' };
 
-let gypJsPath = path.join(
-  __dirname,
-  'node_modules',
-  '.bin',
-  process.platform === 'win32' ? 'node-gyp.cmd' : 'node-gyp'
-);
+// cpGyp: copy the platform-specific gyp files to the project root where node-gyp expects them
+function copyGyp() {
+  const src = path.join(__dirname, 'build_def', platform);
+  fs.copySync(path.join(src, 'binding.gyp'), path.join(__dirname, 'binding.gyp'));
+  fs.copySync(path.join(src, 'uiohook.gyp'), path.join(__dirname, 'uiohook.gyp'));
+}
 
-let files = [];
-let targets;
-let chain = Promise.resolve();
-
-initBuild();
-
-function initBuild() {
-  // Check if a specific runtime has been specified from the command line
-  if ('runtime' in argv && 'version' in argv && 'abi' in argv) {
-    targets = [
-      [argv['runtime'], argv['version'], argv['abi']]
-    ];
-  } else if ('all' in argv) {
-    // If "--all", use those defined in package.json
-    targets = require('./package.json').supportedTargets;
-  } else {
-    const options = optionsFromPackage();
-    if (process.env.npm_config_targets) {
-      options.targets = options.targets.concat(
-        process.env.npm_config_targets.split(',')
-      );
-    }
-    options.targets = options.targets.map((targetStr) => targetStr.split('-'));
-    if (process.env.npm_config_targets === 'all') {
-      options.targets = supportedTargets.map((arr) => [arr[0], arr[2]]);
-      options.platforms = ['win32', 'darwin', 'linux'];
-      options.arches = ['x64', 'ia32', 'arm64'];
-    }
-    if (process.env.npm_config_platforms) {
-      options.platforms = options.platforms.concat(
-        process.env.npm_config_platforms.split(',')
-      );
-    }
-    if (process.env.npm_config_arches) {
-      options.arches = options.arches.concat(
-        process.env.npm_config_arches.split(',')
-      );
-    }
-
-    if (options.targets.length > 0) {
-      targets = options.targets.map((e) => [
-        e[0],
-        nodeAbi.getTarget(e[1], e[0]),
-        e[1],
-      ]);
-    } else {
-      const runtime = process.versions['electron'] ? 'electron' : 'node';
-      const version = process.versions.node;
-      const abi = process.versions.modules;
-      targets = [
-        [runtime, version, abi]
-      ];
-    }
+function build() {
+  const gyp = path.join(__dirname, 'node_modules', '.bin', platform === 'win32' ? 'node-gyp.cmd' : 'node-gyp');
+  const args = ['configure', 'rebuild', `--arch=${arch}`];
+  if (platform === 'win32') {
+    args.push(`--msvs_version=${argv.msvs_version || 2022}`);
   }
-
-  targets.forEach((parts) => {
-    let runtime = parts[0];
-    let version = parts[1];
-    let abi = parts[2];
-    chain = chain
-      .then(function () {
-        return build(runtime, version, abi);
-      })
-      .then(function () {
-        return tarGz(runtime, abi);
-      })
-      .catch((err) => {
-        console.error(err);
-        process.exit(1);
-      });
-  });
-
-  chain = chain.then(function () {
-    if ('upload' in argv && argv['upload'] === 'false') {
-      // If no upload has been specified, don't attempt to upload
-      return;
-    }
-    return uploadFiles(files);
-  });
-
-  cpGyp();
+  console.log(`Building iohook (N-API) for ${platformDir}`);
+  execSync(`${gyp} ${args.join(' ')}`, { stdio: 'inherit', env: process.env });
 }
 
-function cpGyp() {
-  try {
-    fs.unlinkSync(path.join(__dirname, 'binding.gyp'));
-    fs.unlinkSync(path.join(__dirname, 'uiohook.gyp'));
-  } catch (e) { }
-  switch (process.platform) {
-    case 'win32':
-    case 'darwin':
-      fs.copySync(
-        path.join(__dirname, 'build_def', process.platform, 'binding.gyp'),
-        path.join(__dirname, 'binding.gyp')
-      );
-      fs.copySync(
-        path.join(__dirname, 'build_def', process.platform, 'uiohook.gyp'),
-        path.join(__dirname, 'uiohook.gyp')
-      );
-      break;
-    default:
-      fs.copySync(
-        path.join(__dirname, 'build_def', 'linux', 'binding.gyp'),
-        path.join(__dirname, 'binding.gyp')
-      );
-      fs.copySync(
-        path.join(__dirname, 'build_def', 'linux', 'uiohook.gyp'),
-        path.join(__dirname, 'uiohook.gyp')
-      );
-      break;
-  }
+// stage the loadable module + its shared library side by side so the rpath (@loader_path / $ORIGIN) resolves
+function stage() {
+  const dest = path.join(__dirname, 'builds', platformDir);
+  fs.emptyDirSync(dest);
+  const release = path.join(__dirname, 'build', 'Release');
+  fs.copySync(path.join(release, 'iohook.node'), path.join(dest, 'iohook.node'));
+  fs.copySync(path.join(release, SHARED_LIB[platform]), path.join(dest, SHARED_LIB[platform]));
+  return dest;
 }
 
-function build(runtime, version, abi) {
-  return new Promise(function (resolve, reject) {
-    let args = [
-      'configure',
-      'rebuild',
-      '--target=' + version,
-      '--arch=' + arch,
-    ];
-
-    if (/^electron/i.test(runtime)) {
-      args.push('--dist-url=https://artifacts.electronjs.org/headers/dist');
-    }
-
-    if (parseInt(abi) >= 80) {
-      if (arch === 'x64' || arch === 'arm64') {
-        args.push('--v8_enable_pointer_compression=1');
-      } else {
-        args.push('--v8_enable_pointer_compression=0');
-        args.push('--v8_enable_31bit_smis_on_64bit_arch=1');
-      }
-    }
-    if (process.platform !== 'win32') {
-      if (parseInt(abi) >= 64) {
-        args.push('--build_v8_with_gn=false');
-      }
-      if (parseInt(abi) >= 67) {
-        args.push('--enable_lto=false');
-      }
-    }
-
-    console.log('Building iohook for ' + runtime + ' v' + version + '>>>>');
-
-    if (process.platform === 'win32') {
-      if (version.split('.')[0] >= 4) {
-        process.env.msvs_toolset = 15;
-        process.env.msvs_version = argv.msvs_version || 2022;
-      } else {
-        process.env.msvs_toolset = 12;
-        process.env.msvs_version = 2013;
-      }
-      args.push('--msvs_version=' + process.env.msvs_version);
-    } else {
-      process.env.gyp_iohook_runtime = runtime;
-      process.env.gyp_iohook_abi = abi;
-      process.env.gyp_iohook_platform = process.platform;
-      process.env.gyp_iohook_arch = arch;
-    }
-
-    try {
-      console.log('Using node-gyp at:', gypJsPath);
-
-      // Use execSync for all platforms and architectures
-      console.log('Using execSync for build');
-
-      // For Windows, we'll use node-gyp directly to avoid path issues
-      // For other platforms, we'll use the full path to node-gyp
-      const cmdPath = process.platform === 'win32' ? 'node-gyp' : gypJsPath;
-      const cmdString = cmdPath + ' ' + args.join(' ');
-      console.log('Running command:', cmdString);
-
-      try {
-        execSync(cmdString, { stdio: 'inherit', env: process.env });
-        resolve();
-      } catch (err) {
-        console.error('Build error:', err);
-        reject(new Error('Failed to build...'));
-      }
-    } catch (err) {
-      console.error('Error:', err);
-      reject(err);
-    }
-  });
+function pack() {
+  const dir = path.join(__dirname, 'prebuilds');
+  fs.ensureDirSync(dir);
+  const file = path.join(dir, `iohook-v${pkg.version}-${platformDir}.tar.gz`);
+  tar.c({ gzip: true, file, sync: true, cwd: path.join(__dirname, 'builds') }, [platformDir]);
+  console.log(`Packaged ${file}`);
 }
 
-function tarGz(runtime, abi) {
-  const FILES_TO_ARCHIVE = {
-    win32: ['build/Release/iohook.node', 'build/Release/uiohook.dll'],
-    linux: ['build/Release/iohook.node', 'build/Release/uiohook.so'],
-    darwin: ['build/Release/iohook.node', 'build/Release/uiohook.dylib'],
-  };
-  const tarPath =
-    'prebuilds/iohook-v' +
-    pkg.version +
-    '-' +
-    runtime +
-    '-v' +
-    abi +
-    '-' +
-    process.platform +
-    '-' +
-    arch +
-    '.tar.gz';
-
-  files.push(tarPath);
-
-  if (!fs.existsSync(path.dirname(tarPath))) {
-    fs.mkdirSync(path.dirname(tarPath));
-  }
-
-  tar.c({
-    gzip: true,
-    file: tarPath,
-    sync: true,
-  },
-    FILES_TO_ARCHIVE[process.platform]
-  );
-}
-
-
-function uploadFiles(files) {
-  const upload = require('prebuild/upload');
-  return new Promise(function (resolve, reject) {
-    console.log(
-      'Uploading ' + files.length + ' prebuilds(s) to Github releases'
-    );
-    let opts = {
-      pkg: pkg,
-      files: files,
-      'tag-prefix': 'v',
-      upload: process.env.GITHUB_ACCESS_TOKEN,
-    };
-    upload(opts, function (err, result) {
-      if (err) {
-        return reject(err);
-      }
-      console.log('Found ' + result.old.length + ' prebuild(s) on Github');
-      if (result.old.length) {
-        result.old.forEach(function (build) {
-          console.log('-> ' + build);
-        });
-      }
-      console.log(
-        'Uploaded ' + result.new.length + ' new prebuild(s) to Github'
-      );
-      if (result.new.length) {
-        result.new.forEach(function (build) {
-          console.log('-> ' + build);
-        });
-      }
-      resolve();
-    });
-  });
-}
+copyGyp();
+build();
+stage();
+pack();

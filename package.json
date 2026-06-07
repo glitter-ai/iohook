@@ -1,6 +1,6 @@
 {
   "name": "iohook",
-  "version": "1.0.38",
+  "version": "1.0.39",
   "description": "Node.js global keyboard and mouse hook (fork)",
   "author": "Everybody",
   "license": "MIT",
@@ -16,8 +16,7 @@
   "types": "index.d.ts",
   "scripts": {
     "install": "node install.js",
-    "build": "node build.js --upload=false",
-    "build:ci": "node build.js --all",
+    "build": "node build.js",
     "build:print": "node -e 'require(\"./helpers\").printManualBuildParams()'",
     "test": "jest",
     "lint:dry": "eslint --ignore-path .lintignore .",
@@ -25,8 +24,7 @@
     "docs:dev": "vuepress dev docs",
     "docs:build": "vuepress build docs",
     "docs:deploy": "npm run docs:build && gh-pages -d docs/.vuepress/dist/",
-    "release": "git add . && git commit -m \"version bump\" && node -e \"const v=require('./package.json').version; require('child_process').execSync('git tag v'+v+' && git push --tags')\"",
-    "postinstall": "node postinstall.js"
+    "release": "git add . && git commit -m \"version bump\" && node -e \"const v=require('./package.json').version; require('child_process').execSync('git tag v'+v+' && git push --tags')\""
   },
   "keywords": [
     "hook",
@@ -63,9 +61,11 @@
     }
   },
   "dependencies": {
+    "node-addon-api": "^8.5.0",
     "nugget": "^2.0.1",
     "pump": "^1.0.3",
     "rc": "^1.2.8",
+    "tar": "^6.2.1",
     "tar-fs": "^1.16.3"
   },
   "devDependencies": {
@@ -81,25 +81,11 @@
     "jest": "^26.6.3",
     "lint-staged": "^11.0.0",
     "minimist": "^1.2.5",
-    "nan": "^2.22.0",
-    "node-abi": "^3.71.0",
-    "node-gyp": "^9.4.0",
-    "prebuild": "^11.0.4",
+    "node-gyp": "^12.4.0",
     "prettier": "^2.3.1",
     "robotjs": "^0.6.0",
-    "tar": "^6.0.5",
     "vuepress": "^1.7.1"
   },
-  "supportedTargets": [
-    [
-      "electron",
-      "33.2.1",
-      "130"
-    ]
-  ],
-  "targetsToInstall": [
-    "electron-130"
-  ],
   "directories": {
     "doc": "docs",
     "example": "examples",

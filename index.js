@@ -1,21 +1,11 @@
 const EventEmitter = require('events');
 const path = require('path');
 
-const runtime = process.versions['electron'] ? 'electron' : 'node';
-const essential =
-  runtime +
-  '-v' +
-  process.versions.modules +
-  '-' +
-  process.platform +
-  '-' +
-  process.arch;
+// N-API binary is ABI-stable, so it is keyed only by platform/arch (not Node/Electron ABI)
 const modulePath = path.join(
   __dirname,
   'builds',
-  essential,
-  'build',
-  'Release',
+  `${process.platform}-${process.arch}`,
   'iohook.node'
 );
 if (process.env.DEBUG) {

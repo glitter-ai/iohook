@@ -4,27 +4,28 @@
 		"win_delay_load_hook": "true",
 		"type": "loadable_module",
 		"sources": [
-			"src/iohook.cc",
-			"src/iohook.h"
+			"src/iohook.cc"
 		],
 		"dependencies": [
 			"./uiohook.gyp:uiohook"
 		],
-		"cflags": [
-			"-std=c++14",
+		"cflags_cc": [
+			"-std=c++17",
 			"-fPIC"
 		],
+		"cflags_cc!": ["-fno-exceptions"],
 		"defines": [
-			"USE_XKBCOMMON"
+			"USE_XKBCOMMON",
+			"NAPI_VERSION=9"
 		],
 		"link_settings": {
 				"libraries": [
-						"-Wl,-rpath,<!(node -e \"console.log('builds/' + process.env.gyp_iohook_runtime + '-v' + process.env.gyp_iohook_abi + '-' + process.env.gyp_iohook_platform + '-' + process.env.gyp_iohook_arch + '/build/Release')\")",
+						"-Wl,-rpath,$$ORIGIN",
 						"-Wl,-rpath,<!(pwd)/build/Release/"
 				]
 		},
 		"include_dirs": [
-			"<!(node -e \"require('nan')\")",
+			"<!(node -p \"require('node-addon-api').include_dir\")",
 			"libuiohook/include"
 		],
 		"configurations": {

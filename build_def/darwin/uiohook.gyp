@@ -31,7 +31,6 @@
 			]
 		},
 		"include_dirs": [
-			"<!(node -e \"require('nan')\")",
 			'libuiohook/include',
 			'libuiohook/src'
 		]

@@ -4,14 +4,16 @@
 		"win_delay_load_hook": "true",
 		"type": "loadable_module",
 		"sources": [
-			"src/iohook.cc",
-			"src/iohook.h"
+			"src/iohook.cc"
 		],
 		"dependencies": [
 			"./uiohook.gyp:uiohook"
 		],
+		"defines": [
+			"NAPI_VERSION=9"
+		],
 		"include_dirs": [
-			"<!(node -e \"require('nan')\")",
+			"<!(node -p \"require('node-addon-api').include_dir\")",
 			"libuiohook/include"
 		],
 		"configurations": {

@@ -13,7 +13,6 @@
 			"libuiohook/src/windows/system_properties.c"
 		],
 		"include_dirs": [
-			'node_modules/nan',
 			'libuiohook/include',
 			'libuiohook/src'
 		]
