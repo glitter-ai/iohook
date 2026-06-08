@@ -22,13 +22,22 @@
 						"-Wl,-rpath,<!(pwd)/build/Release/",
 						"-lX11",
 						"-lX11-xcb",
+						"-lxcb",
 						"-lxkbcommon-x11",
 						"-lxkbcommon",
+						"-lxkbfile",
+						"-lXt",
+						"-lXinerama",
 						"-lXtst"
 				]
 		},
 		"defines": [
-			"USE_XKBCOMMON"
+			"USE_XKB_COMMON",
+			"USE_XKB_FILE",
+			"USE_XT",
+			"USE_XINERAMA",
+			"USE_XTEST",
+			"USE_EVDEV"
 		],
 		"include_dirs": [
 			'libuiohook/include',

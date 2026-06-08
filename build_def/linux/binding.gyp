@@ -15,7 +15,6 @@
 		],
 		"cflags_cc!": ["-fno-exceptions"],
 		"defines": [
-			"USE_XKBCOMMON",
 			"NAPI_VERSION=9"
 		],
 		"link_settings": {
