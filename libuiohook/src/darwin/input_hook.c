@@ -1292,6 +1292,9 @@ UIOHOOK_API int hook_run() {
                 int event_runloop_status = create_event_runloop_info(&hook);
                 if (event_runloop_status != UIOHOOK_SUCCESS) {
                     destroy_event_runloop_info(&hook);
+
+                    // This thread is exiting: hook_stop must never see this run loop again.
+                    event_loop = NULL;
                     return event_runloop_status;
                 }
 
@@ -1301,6 +1304,7 @@ UIOHOOK_API int hook_run() {
                     logger(LOG_LEVEL_ERROR, "%s [%u]: Failed to allocate memory for TIS message structure!\n",
                                 __FUNCTION__, __LINE__);
 
+                    event_loop = NULL;
                     return UIOHOOK_ERROR_OUT_OF_MEMORY;
                 }
 
@@ -1310,6 +1314,7 @@ UIOHOOK_API int hook_run() {
                     logger(LOG_LEVEL_ERROR, "%s [%u]: Failed to allocate memory for TIS event structure!\n",
                                 __FUNCTION__, __LINE__);
 
+                    event_loop = NULL;
                     return UIOHOOK_ERROR_OUT_OF_MEMORY;
                 }
                 #endif
@@ -1359,6 +1364,8 @@ UIOHOOK_API int hook_run() {
                         int keycode_runloop_status = create_main_runloop_info(&main_runloop_keycode, &main_runloop_keycode_context);
                         if (keycode_runloop_status != UIOHOOK_SUCCESS) {
                             destroy_main_runloop_info(&main_runloop_keycode);
+
+                            event_loop = NULL;
                             return keycode_runloop_status;
                         }
                         #endif
