@@ -1402,6 +1402,9 @@ UIOHOOK_API int hook_run() {
 
                 destroy_event_runloop_info(&hook);
             } while (restart_tap);
+
+            // the loop is gone - a later hook_stop must see NULL, never a dangling run loop
+            event_loop = NULL;
         } else {
             logger(LOG_LEVEL_ERROR, "%s [%u]: CFRunLoopGetCurrent failure!\n",
                     __FUNCTION__, __LINE__);
@@ -1423,6 +1426,15 @@ UIOHOOK_API int hook_run() {
 
 UIOHOOK_API int hook_stop() {
     int status = UIOHOOK_FAILURE;
+
+    // NULL when the hook never started (hook_run bailed on a revoked Accessibility API) or its
+    // thread already tore down - stopping then must be a no-op, not a NULL dereference
+    if (event_loop == NULL) {
+        logger(LOG_LEVEL_DEBUG, "%s [%u]: No event loop - hook is not running.\n",
+                __FUNCTION__, __LINE__);
+
+        return status;
+    }
 
     CFStringRef mode = CFRunLoopCopyCurrentMode(event_loop);
     if (mode != NULL) {
