@@ -1137,8 +1137,10 @@ static int create_event_runloop_info(event_runloop_info **hook) {
         return UIOHOOK_FAILURE;
     }
 
-    // Try and allocate memory for event_runloop_info.
-    *hook = malloc(sizeof(event_runloop_info));
+    // Try and allocate memory for event_runloop_info. Zeroed: a partway-failed creation (e.g.
+    // CGEventTapCreate refused after Accessibility was revoked) is destroyed by the caller, and
+    // destroy's NULL checks are only sound if unassigned members are NULL rather than junk.
+    *hook = calloc(1, sizeof(event_runloop_info));
     if (*hook == NULL) {
         logger(LOG_LEVEL_ERROR, "%s [%u]: Failed to allocate memory for event_runloop_info structure!\n",
                 __FUNCTION__, __LINE__);
@@ -1250,10 +1252,14 @@ static void destroy_event_runloop_info(event_runloop_info **hook) {
             (*hook)->source = NULL;
         }
 
-        // Stop the CFMachPort from receiving any more messages.
-        CFMachPortInvalidate((*hook)->port);
-        CFRelease((*hook)->port);
-        (*hook)->port = NULL;
+        // Stop the CFMachPort from receiving any more messages. The port is NULL when
+        // CGEventTapCreate failed (Accessibility revoked at runtime) - invalidating it then
+        // crashed in CF_IS_OBJC with a NULL dereference.
+        if ((*hook)->port != NULL) {
+            CFMachPortInvalidate((*hook)->port);
+            CFRelease((*hook)->port);
+            (*hook)->port = NULL;
+        }
 
         // Free the hook structure.
         free(*hook);
