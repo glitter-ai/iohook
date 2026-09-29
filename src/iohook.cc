@@ -23,7 +23,6 @@ static bool sIsDebug = false;
 // thread-safe bridge from the native hook thread to the JS callback; ABI-stable, so this
 // binary loads on any Node/Electron with N-API >= 9 and never needs an ABI-targeted rebuild
 static Napi::ThreadSafeFunction sTsfn;
-static std::thread sWorkerThread;
 
 // Native thread errors.
 #define UIOHOOK_ERROR_THREAD_CREATE       0x10
@@ -205,6 +204,8 @@ void *hook_thread_proc(void *arg) {
     *(int *) arg = status;
     #endif
   }
+  // the producer's reference: the bridge outlives every dispatch this thread can still make
+  sTsfn.Release();
 
   // Make sure we signal that we have passed any exception throwing code for
   // the waiting hook_enable().
@@ -472,20 +473,19 @@ void StartHook(const Napi::CallbackInfo &info) {
   }
 
   // queue size 0 = unlimited; one producer thread (the native hook thread)
-  sTsfn = Napi::ThreadSafeFunction::New(info.Env(), info[0].As<Napi::Function>(), "iohook", 0, 1);
+  // two holders: this thread releases in StopHook, the hook thread when hook_run returns
+  sTsfn = Napi::ThreadSafeFunction::New(info.Env(), info[0].As<Napi::Function>(), "iohook", 0, 2);
   // a global input hook must never keep the process alive - unref so app quit isn't blocked by this handle
   sTsfn.Unref(info.Env());
   sIsRunning = true;
-  sWorkerThread = std::thread(run);
+  // never joined; a joinable thread left at exit would std::terminate the process
+  std::thread(run).detach();
 }
 
 void StopHook(const Napi::CallbackInfo &info) {
   if (!sIsRunning) return;
-  stop();
   sIsRunning = false;
-  if (sWorkerThread.joinable()) {
-    sWorkerThread.detach();
-  }
+  stop();
   sTsfn.Release();
 }
 
