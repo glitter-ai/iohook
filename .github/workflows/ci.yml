@@ -20,7 +20,7 @@ jobs:
             arch: x64
           - os: macos-15 # native arm64
             arch: arm64
-          - os: windows-latest
+          - os: windows-2025-vs2026 # pinned; windows-latest redirects here by Jun 2026
             arch: x64
           - os: windows-11-arm
             arch: arm64
